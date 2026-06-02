@@ -573,63 +573,105 @@ async def logout(authorization: Optional[str] = Header(None)):
 # ── Centralized Scoring & Verdict Aggregation ─────────────────────────────────
 def aggregate_forensic_scores(engine_scores: dict, media_type: str, face_cmp: Optional[dict] = None) -> dict:
     """
-    Centralized scoring system that aggregates all engine outputs, anomaly scores,
-    and confidence scores to output precise real/fake probabilities, threat levels,
-    verdicts, and structural explanations.
+    Evidence-based scoring system.
+
+    IMPORTANT:
+    - Engine values are treated as anomaly indicators, not direct fake probability.
+    - A file is marked fake only when multiple independent engines are strongly suspicious.
+    - Real/mobile camera images are protected from false positives.
     """
-    active_scores = [v for v in engine_scores.values() if v is not None]
-    if not active_scores:
-        fake_score = 50.0
+    cleaned_scores = {}
+    for key, value in (engine_scores or {}).items():
+        try:
+            if value is not None:
+                cleaned_scores[key] = float(value)
+        except Exception:
+            pass
+
+    if not cleaned_scores:
+        fake_prob = 12.0
     else:
-        fake_score = sum(active_scores) / len(active_scores)
-        
-    # Penalty for facial biometric mismatch
-    if face_cmp and not face_cmp.get("match", True):
-        fake_score = min(100.0, fake_score + 15.0)
-        
-    fake_prob = round(fake_score, 1)
+        values = list(cleaned_scores.values())
+        avg_score = float(np.mean(values))
+        max_score = float(np.max(values))
+
+        strong_flags = sum(1 for v in values if v >= 78.0)
+        medium_flags = sum(1 for v in values if 55.0 <= v < 78.0)
+
+        # Evidence consensus rule:
+        # Do not classify as fake from one high engine alone.
+        if strong_flags >= 3:
+            fake_prob = 86.0
+        elif strong_flags == 2 and medium_flags >= 1:
+            fake_prob = 72.0
+        elif strong_flags == 2:
+            fake_prob = 62.0
+        elif strong_flags == 1 and medium_flags >= 2:
+            fake_prob = 52.0
+        elif medium_flags >= 4:
+            fake_prob = 45.0
+        else:
+            # Real-safe compression: normal images remain low risk.
+            fake_prob = min(38.0, max(8.0, avg_score * 0.45))
+
+        # Only extremely high average should raise review score.
+        if avg_score >= 82.0 and max_score >= 90.0:
+            fake_prob = max(fake_prob, 78.0)
+
+    # Public biometric mismatch should not automatically mean deepfake.
+    if face_cmp and face_cmp.get("match") is False:
+        try:
+            similarity = float(face_cmp.get("similarity_score", 100.0))
+        except Exception:
+            similarity = 100.0
+        if similarity < 35.0:
+            fake_prob = min(100.0, fake_prob + 6.0)
+
+    fake_prob = round(float(fake_prob), 1)
     real_prob = round(100.0 - fake_prob, 1)
-    
-    is_fake = fake_prob >= 50.0
+
+    # Final deepfake threshold: only very strong evidence becomes fake.
+    is_fake = fake_prob >= 80.0
     confidence = fake_prob if is_fake else real_prob
-    
-    if fake_prob < 30.0:
+
+    if fake_prob < 40.0:
         threat_level = "LOW"
         risk_level = "LOW RISK"
-    elif fake_prob < 50.0:
+    elif fake_prob < 65.0:
         threat_level = "MODERATE"
-        risk_level = "MODERATE RISK"
-    elif fake_prob < 75.0:
+        risk_level = "MODERATE RISK / REVIEW REQUIRED"
+    elif fake_prob < 80.0:
         threat_level = "HIGH"
-        risk_level = "HIGH RISK"
+        risk_level = "HIGH RISK / MANUAL REVIEW REQUIRED"
     else:
         threat_level = "CRITICAL"
         risk_level = "CRITICAL"
-        
+
     if media_type == "video":
         verdict = "Deepfake Detected" if is_fake else "Authentic Video"
-        verdict_title = "DEEPFAKE VIDEO DETECTED" if is_fake else "AUTHENTIC VIDEO"
+        verdict_title = "DEEPFAKE VIDEO DETECTED" if is_fake else "AUTHENTIC VIDEO / NO STRONG DEEPFAKE EVIDENCE"
         media_text = "video evidence"
     elif media_type == "audio":
         verdict = "Deepfake Detected" if is_fake else "Authentic Voice"
-        verdict_title = "AI GENERATED VOICE DETECTED" if is_fake else "AUTHENTIC HUMAN VOICE"
+        verdict_title = "AI GENERATED VOICE DETECTED" if is_fake else "AUTHENTIC HUMAN VOICE / NO STRONG SYNTHETIC EVIDENCE"
         media_text = "audio recording"
     else:
         verdict = "Deepfake Detected" if is_fake else "Authentic Image"
-        verdict_title = "DEEPFAKE IMAGE DETECTED" if is_fake else "AUTHENTIC IMAGE"
+        verdict_title = "DEEPFAKE IMAGE DETECTED" if is_fake else "AUTHENTIC IMAGE / NO STRONG DEEPFAKE EVIDENCE"
         media_text = "image asset"
-        
+
+    engine_summary = ", ".join(f"{k}={round(v, 1)}" for k, v in cleaned_scores.items()) or "no engine scores"
+
     explanation = (
-        f"Forensic verification completed. The {media_text} shows a {fake_prob}% probability of synthetic "
-        f"origin versus {real_prob}% probability of genuine capture. "
+        f"Forensic verification completed for the {media_text}. "
+        f"Engine evidence: {engine_summary}. "
+        f"The final decision uses multi-engine consensus, not a single score. "
+        f"Synthetic probability is {fake_prob}% and genuine probability is {real_prob}%."
     )
-    if is_fake:
-        explanation += "Aggregated sensor anomaly score and high-frequency structural deviations confirm generative AI manipulation."
-    else:
-        explanation += "No spatial, spectral, or organic biometric irregularities were observed."
-        
+
     return {
         "fake_score": fake_prob,
+        "deepfake_score": fake_prob,
         "composite_score": fake_prob,
         "fake_probability": fake_prob,
         "real_probability": real_prob,
@@ -638,6 +680,7 @@ def aggregate_forensic_scores(engine_scores: dict, media_type: str, face_cmp: Op
         "confidence": confidence,
         "verdict": verdict,
         "verdict_title": verdict_title,
+        "result": verdict_title,
         "is_fake": is_fake,
         "ai_forensic_explanation": explanation
     }
@@ -670,11 +713,17 @@ async def analyze_image(
     img_arr = utils.pil_to_numpy(img_pil)
 
     bbox = detector.detect_face(img_arr)
-    if bbox is None:
-        raise HTTPException(status_code=422, detail="No face detected in the uploaded image")
 
-    landmarks = detector.extract_landmarks(img_arr)
-    face_roi  = detector.get_face_roi(img_arr, bbox)
+    # If no human face is found, continue using full-image forensic analysis.
+    # This supports AI art, cartoons, objects, and images where face detection fails.
+    if bbox is None:
+        h, w = img_arr.shape[:2]
+        bbox = (0, 0, w, h)
+        landmarks = None
+        face_roi = img_arr
+    else:
+        landmarks = detector.extract_landmarks(img_arr)
+        face_roi = detector.get_face_roi(img_arr, bbox)
 
     # Enforce face matching for public access (common role)
     face_cmp = {"similarity_score": 0.0, "status": "N/A", "match": False}
@@ -764,12 +813,22 @@ async def analyze_image(
         "active_engine": "Geometric Landmark Core",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 30.0
+        "total_time": 3.0
     }
 
     ela_result = forensics.run_ela(img_pil, face_roi)
     fft_result = forensics.run_fft(face_roi)
-    geo_result = forensics.run_geometry(landmarks, img_arr.shape)
+
+    if landmarks:
+        geo_result = forensics.run_geometry(landmarks, img_arr.shape)
+    else:
+        geo_result = {
+            "score": 5.0,
+            "status": "NO FACE LANDMARKS - FULL IMAGE FORENSIC ANALYSIS USED",
+            "summary": "No facial landmarks detected. The system continued with ELA, FFT, texture, and color forensic analysis.",
+            "table": []
+        }
+
     tex_result = forensics.run_texture(face_roi)
     col_result = forensics.run_color(img_arr, bbox)
 
@@ -791,7 +850,7 @@ async def analyze_image(
     verdict["timestamp"] = timestamp
 
     img_b64 = {
-        "bbox": _img_to_b64(detector.draw_face_bbox(img_arr, bbox, verdict["is_fake"])),
+        "bbox": _img_to_b64(detector.draw_face_bbox(img_arr, bbox, False)),
         "mesh": _img_to_b64(detector.draw_landmark_mesh(img_arr, landmarks) if landmarks else img_arr),
         "ela":  _img_to_b64(visualizer.render_ela_heatmap(ela_result["ela_image"], ela_result["mean_ela"]) if ela_result.get("ela_image") else None),
         "fft":  _img_to_b64(visualizer.render_fft_spectrum(fft_result.get("log_magnitude"), fft_result["periodicity_score"])),
@@ -865,7 +924,7 @@ async def analyze_image(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 30.0:
+    if elapsed < 3.0:
         sleep_steps = [
             (20, "Error Level Analysis (ELA)", ela_result["score"]),
             (40, "Fast Fourier Transform (FFT)", fft_result["score"]),
@@ -878,7 +937,7 @@ async def analyze_image(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 30.0 - (time.time() - start_time)
+            rem = 3.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
@@ -923,11 +982,10 @@ async def analyze_video(
             break
             
     if test_lm is None:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
-        raise HTTPException(status_code=422, detail="No face detected in any of the sampled video frames")
+        # Continue with temporal/video forensic analysis even if no face is detected.
+        # This supports object videos, screen recordings, cartoons, and low-quality clips.
+        test_lm = None
+        test_shape = frames[0].shape if frames else None
 
     # Enforce face matching for public access (common role)
     face_cmp = {"similarity_score": 0.0, "status": "N/A", "match": False}
@@ -1062,7 +1120,7 @@ async def analyze_video(
         "active_engine": "Temporal Consistency Core",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 45.0
+        "total_time": 5.0
     }
 
     has_audio = meta.get("has_audio", False)
@@ -1210,7 +1268,7 @@ async def analyze_video(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 45.0:
+    if elapsed < 5.0:
         sleep_steps = [
             (15, "Temporal Flow Delta", e_temporal["score"]),
             (30, "Identity Persistence Scan", e_identity["score"]),
@@ -1224,7 +1282,7 @@ async def analyze_video(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 45.0 - (time.time() - start_time)
+            rem = 5.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
@@ -1283,7 +1341,7 @@ async def analyze_audio(
         "active_engine": "Voice Spectral Ingestion",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 45.0
+        "total_time": 5.0
     }
 
     meta = ae.extract_audio_metadata(file_bytes, file.filename)
@@ -1402,7 +1460,7 @@ async def analyze_audio(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 45.0:
+    if elapsed < 5.0:
         sleep_steps = [
             (15, "Voice Spectral Analysis", e_spec["score"]),
             (30, "MFCC Pattern Ingestion", e_mfcc["score"]),
@@ -1416,7 +1474,7 @@ async def analyze_audio(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 45.0 - (time.time() - start_time)
+            rem = 5.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
