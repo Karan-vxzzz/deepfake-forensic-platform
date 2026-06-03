@@ -37,9 +37,20 @@ from api_models import (
 
 # ── MongoDB Storage Layer (optional, will not break app if DB is unavailable) ──
 try:
-    from database import save_user, save_scan, save_report, save_audit_log
+    from database import (
+        users_collection,
+        reports_collection,
+        scan_history_collection,
+        save_user,
+        save_scan,
+        save_report,
+        save_audit_log,
+    )
 except Exception as db_import_error:
     print(f"⚠️ MongoDB storage disabled: {db_import_error}")
+    users_collection = None
+    reports_collection = None
+    scan_history_collection = None
 
     def save_user(*args, **kwargs):
         return None
