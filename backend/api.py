@@ -35,6 +35,24 @@ from api_models import (
     ScanHistoryItem, AdminStats
 )
 
+# ── MongoDB Storage Layer (optional, will not break app if DB is unavailable) ──
+try:
+    from database import save_user, save_scan, save_report, save_audit_log
+except Exception as db_import_error:
+    print(f"⚠️ MongoDB storage disabled: {db_import_error}")
+
+    def save_user(*args, **kwargs):
+        return None
+
+    def save_scan(*args, **kwargs):
+        return None
+
+    def save_report(*args, **kwargs):
+        return None
+
+    def save_audit_log(*args, **kwargs):
+        return None
+
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AI Cyber Forensic Intelligence Platform API",
@@ -442,6 +460,8 @@ async def login(req: FlexibleLoginRequest):
         }
         CREDENTIALS[username] = creds
 
+    save_user({"username": username, **creds})
+
     # Update last login time
     creds["last_login"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -452,6 +472,8 @@ async def login(req: FlexibleLoginRequest):
         "action": "LOGIN_SUCCESS",
         "details": f"Demo login approved. Role: {creds['role']}."
     })
+    save_user({"username": username, **creds})
+    save_audit_log(audit_logs[-1])
 
     token = base64.b64encode(
         f"{username}:{creds['role']}:{uuid.uuid4()}".encode()
@@ -487,6 +509,7 @@ async def signup(req: SignupRequest):
         "registration_date": datetime.datetime.now().strftime("%Y-%m-%d"),
         "last_login": now_str
     }
+    save_user({"username": req.username, **CREDENTIALS[req.username]})
     
     # Audit log entry
     audit_logs.append({
@@ -495,6 +518,7 @@ async def signup(req: SignupRequest):
         "action": "USER_SIGNUP",
         "details": f"New profile registered: {req.username} ({req.role})."
     })
+    save_audit_log(audit_logs[-1])
     
     return {"success": True, "message": "Identity registered successfully. Biometric eKYC enrollment required."}
 
@@ -536,6 +560,8 @@ async def enroll_biometrics(req: BiometricEnrollRequest):
             f"Facial embeddings (128-dim) stored. Reference frame secured."
         )
     })
+    save_user({"username": req.username, **user_profile})
+    save_audit_log(audit_logs[-1])
 
     return {
         "success": True,
@@ -560,6 +586,7 @@ async def biometric_login(req: BiometricLoginRequest):
         "action": "BIO_LOGIN_SUCCESS",
         "details": "eKYC liveness bypass approved."
     })
+    save_audit_log(audit_logs[-1])
     
     token = base64.b64encode(f"{req.username}:{user_profile['role']}:{uuid.uuid4()}".encode()).decode()
     return LoginResponse(
@@ -594,6 +621,7 @@ async def logout(authorization: Optional[str] = Header(None)):
         "action": "LOGOUT",
         "details": "User session terminated successfully."
     })
+    save_audit_log(audit_logs[-1])
     return {"success": True, "message": "Session terminated"}
 
 # ── Centralized Scoring & Verdict Aggregation ─────────────────────────────────
@@ -868,6 +896,7 @@ async def analyze_image(
         "risk_level": verdict.get("risk_level","N/A"), "confidence": verdict.get("confidence",0),
         "username": current_user.get("username") if current_user else None
     })
+    save_scan(scan_history[-1])
 
     # Permanent audit logs
     audit_logs.append({
@@ -876,6 +905,7 @@ async def analyze_image(
         "action": "SCAN_COMPLETED",
         "details": f"Image scan {scan_id} processed. Verdict: {'FAKE' if verdict['is_fake'] else 'REAL'} ({verdict['confidence']}% confidence)."
     })
+    save_audit_log(audit_logs[-1])
 
     # Return full compatibility structure for both React frontend and external APIs
     response_data = {
@@ -908,6 +938,7 @@ async def analyze_image(
     }
     
     scan_results_store[scan_id] = response_data
+    save_report(scan_id, response_data)
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
@@ -1173,6 +1204,7 @@ async def analyze_video(
         "confidence": verdict.get("confidence", 0),
         "username": current_user.get("username") if current_user else None
     })
+    save_scan(scan_history[-1])
 
     # Permanent audit logs
     audit_logs.append({
@@ -1181,6 +1213,7 @@ async def analyze_video(
         "action": "SCAN_COMPLETED",
         "details": f"Video scan {scan_id} processed. Verdict: {'FAKE' if verdict['is_fake'] else 'REAL'} ({verdict['confidence']}% confidence)."
     })
+    save_audit_log(audit_logs[-1])
 
     # Clean temp video file
     try:
@@ -1253,6 +1286,7 @@ async def analyze_video(
     }
     
     scan_results_store[scan_id] = response_data
+    save_report(scan_id, response_data)
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
@@ -1371,6 +1405,7 @@ async def analyze_audio(
         "confidence": verdict.get("confidence",0),
         "username": current_user.get("username") if current_user else None
     })
+    save_scan(scan_history[-1])
 
     # Permanent audit logs
     audit_logs.append({
@@ -1379,6 +1414,7 @@ async def analyze_audio(
         "action": "SCAN_COMPLETED",
         "details": f"Audio scan {scan_id} processed. Verdict: {'FAKE' if verdict['is_fake'] else 'REAL'} ({verdict['confidence']}% confidence)."
     })
+    save_audit_log(audit_logs[-1])
 
     img_b64 = {}
     spec = e_spec.get("spectral_data", [])
@@ -1445,6 +1481,7 @@ async def analyze_audio(
     }
     
     scan_results_store[scan_id] = response_data
+    save_report(scan_id, response_data)
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
@@ -1546,6 +1583,8 @@ async def admin_unblock_user(req: AdminActionRequest, authorization: Optional[st
         "action": "USER_UNBLOCKED",
         "details": f"User {req.username} manually unblocked and warning count reset to 0 by operative."
     })
+    save_user({"username": req.username, **target_user})
+    save_audit_log(audit_logs[-1])
     
     return {"success": True, "message": f"User {req.username} successfully unblocked and warnings reset."}
 
