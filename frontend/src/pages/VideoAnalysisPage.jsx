@@ -317,7 +317,7 @@ const VideoAnalysisPage = () => {
                 NEW SCAN
               </button>
               <button 
-                onClick={() => window.open(`http://localhost:8000/api/report/${results.scan_id}`, '_blank')}
+                onClick={() => window.open(`https://deepfake-forensic-platform.onrender.com/api/report/${results.scan_id}`, '_blank')}
                 className="flex items-center gap-2 px-6 py-3 bg-cyber-cyan/10 border border-cyber-cyan text-cyber-cyan hover:bg-cyber-cyan hover:text-black rounded font-orbitron tracking-widest transition-all shadow-[0_0_10px_rgba(0,255,255,0.15)] hover:shadow-[0_0_20px_rgba(0,255,255,0.4)] text-sm group"
               >
                 <Activity className="w-4 h-4" /> VIEW REPORT
