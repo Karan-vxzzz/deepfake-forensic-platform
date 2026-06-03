@@ -57,6 +57,11 @@ active_scans: dict = {}
 
 START_TIME = datetime.datetime.now()
 
+# Demo/college-project mode:
+# False = any logged-in user can analyze any uploaded image/video/audio.
+# True  = common users must match enrolled biometric face.
+ENFORCE_PUBLIC_BIOMETRIC_MATCH = False
+
 # ── Credentials & Advanced User Storage ───────────────────────────────────────
 # 3-Tier Role Architecture: common | operative | commander
 CREDENTIALS = {
@@ -66,7 +71,7 @@ CREDENTIALS = {
         "name": "Prajwal Saski",
         "email": "prajwalsaski@gmail.com",
         "organization": "Public Forensic Labs",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 1,
         "otp_verified": True,
@@ -78,7 +83,7 @@ CREDENTIALS = {
         "email": "forensicoperative12@gmail.com",
         "organization": "State Cyber Laboratory",
         "operative_id": "OPR-1212",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 2,
     },
@@ -89,7 +94,7 @@ CREDENTIALS = {
         "name": "Demo User",
         "email": "demo@example.com",
         "organization": "",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 1,
         "otp_verified": True,
@@ -102,7 +107,7 @@ CREDENTIALS = {
         "email": "operative.alpha@forensic.gov",
         "organization": "State Cyber Laboratory",
         "operative_id": "OPR-7742",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 2,
     },
@@ -125,7 +130,7 @@ CREDENTIALS = {
         "email": "commander@forensic.gov",
         "organization": "National Cyber Forensics Division",
         "clearance_id": "CMD-OMEGA-001",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 3,
         "mfa_enabled": True,
@@ -138,7 +143,7 @@ CREDENTIALS = {
         "email": "admin@forensic.gov",
         "organization": "National Cyber Forensics Division",
         "clearance_id": "CMD-ADMIN-000",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 3,
         "mfa_enabled": True,
@@ -149,7 +154,7 @@ CREDENTIALS = {
         "name": "Default User",
         "email": "user@example.com",
         "organization": "",
-        "biometrics_enrolled": True,
+        "biometrics_enrolled": False,
         "biometrics_data": None,
         "security_level": 1,
         "otp_verified": True,
@@ -380,69 +385,71 @@ core_alerts = [
     {"id": 2, "severity": "INFO", "title": "MODEL_STABILITY", "message": "Neural core computational load balance optimal at 28.5%.", "timestamp": (datetime.datetime.now() - datetime.timedelta(minutes=12)).strftime("%Y-%m-%d %H:%M:%S")}
 ]
 
-@app.post("/api/auth/login", response_model=LoginResponse)
-async def login(req: LoginRequest):
+class FlexibleLoginRequest(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None
+    password: str
+
+def find_user_by_identifier(identifier: str):
     """
-    Demo-friendly login for review.
-    Any email/Gmail and any non-empty password will be accepted.
-    Existing users keep their saved role. New users are created as operative users.
+    Login helper.
+    Accepts either:
+    1. Dictionary key like demo/admin/operative
+    2. Email like prajwalsaski@gmail.com
+    3. Stored email field inside CREDENTIALS
     """
-    username = (req.username or "").strip()
-    password = (req.password or "").strip()
+    if not identifier:
+        return None, None
 
-    if not username:
-        raise HTTPException(status_code=400, detail="Email is required")
+    identifier = identifier.strip()
 
-    if not password:
-        raise HTTPException(status_code=400, detail="Password is required")
+    # Direct username/key login
+    if identifier in CREDENTIALS:
+        return identifier, CREDENTIALS[identifier]
 
-    # If the user already exists, use existing profile but do not block login due to password mismatch.
-    creds = CREDENTIALS.get(username)
+    # Email-field login
+    for username, profile in CREDENTIALS.items():
+        if profile.get("email", "").lower() == identifier.lower():
+            return username, profile
 
-    # Also allow login using stored email value, not only dictionary key.
-    if not creds:
-        for key, value in CREDENTIALS.items():
-            if value.get("email", "").lower() == username.lower():
-                creds = value
-                username = key
-                break
+    return None, None
 
-    # Auto-create new account for any Gmail/email during demo.
-    if not creds:
-        display_name = username.split("@")[0] if "@" in username else username
-        creds = {
-            "password": password,
-            "role": "operative",
-            "name": display_name,
-            "email": username,
-            "organization": "DeepFake Forensic Platform",
-            "biometrics_enrolled": True,
-            "biometrics_data": None,
-            "security_level": 2,
-            "registration_date": datetime.datetime.now().strftime("%Y-%m-%d"),
-        }
-        CREDENTIALS[username] = creds
+@app.post("/api/auth/login")
+@app.post("/api/login")
+@app.post("/login")
+async def login(req: FlexibleLoginRequest):
+    identifier = req.username or req.email
+    username, creds = find_user_by_identifier(identifier)
 
+    if not creds or creds.get("password") != req.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # Update last login time
     creds["last_login"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Track login audit trail
     audit_logs.append({
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "operator": username,
         "action": "LOGIN_SUCCESS",
-        "details": f"Demo login approved. Role: {creds.get('role', 'operative')}."
+        "details": f"Credentials approved. Role: {creds['role']}."
     })
 
     token = base64.b64encode(
-        f"{username}:{creds.get('role', 'operative')}:{uuid.uuid4()}".encode()
+        f"{username}:{creds['role']}:{uuid.uuid4()}".encode()
     ).decode()
 
-    return LoginResponse(
-        success=True,
-        token=token,
-        role=creds.get("role", "operative"),
-        username=username,
-        message="Authentication successful"
-    )
+    return {
+        "success": True,
+        "token": token,
+        "role": creds["role"],
+        "username": username,
+        "name": creds.get("name", ""),
+        "email": creds.get("email", ""),
+        "organization": creds.get("organization", ""),
+        "security_level": creds.get("security_level", 1),
+        "message": "Authentication successful"
+    }
 
 @app.post("/api/auth/signup")
 async def signup(req: SignupRequest):
@@ -573,105 +580,76 @@ async def logout(authorization: Optional[str] = Header(None)):
 # ── Centralized Scoring & Verdict Aggregation ─────────────────────────────────
 def aggregate_forensic_scores(engine_scores: dict, media_type: str, face_cmp: Optional[dict] = None) -> dict:
     """
-    Evidence-based scoring system.
-
-    IMPORTANT:
-    - Engine values are treated as anomaly indicators, not direct fake probability.
-    - A file is marked fake only when multiple independent engines are strongly suspicious.
-    - Real/mobile camera images are protected from false positives.
+    Conservative demo scoring system.
+    This prevents normal/real photos from being marked fake too easily.
+    A file is marked FAKE only when several engines strongly agree.
     """
-    cleaned_scores = {}
-    for key, value in (engine_scores or {}).items():
-        try:
-            if value is not None:
-                cleaned_scores[key] = float(value)
-        except Exception:
-            pass
+    active_scores = [float(v) for v in engine_scores.values() if v is not None]
 
-    if not cleaned_scores:
-        fake_prob = 12.0
+    if not active_scores:
+        fake_score = 20.0
     else:
-        values = list(cleaned_scores.values())
-        avg_score = float(np.mean(values))
-        max_score = float(np.max(values))
+        avg_score = sum(active_scores) / len(active_scores)
+        max_score = max(active_scores)
+        strong_flags = sum(1 for s in active_scores if s >= 75.0)
 
-        strong_flags = sum(1 for v in values if v >= 78.0)
-        medium_flags = sum(1 for v in values if 55.0 <= v < 78.0)
-
-        # Evidence consensus rule:
-        # Do not classify as fake from one high engine alone.
-        if strong_flags >= 3:
-            fake_prob = 86.0
-        elif strong_flags == 2 and medium_flags >= 1:
-            fake_prob = 72.0
-        elif strong_flags == 2:
-            fake_prob = 62.0
-        elif strong_flags == 1 and medium_flags >= 2:
-            fake_prob = 52.0
-        elif medium_flags >= 4:
-            fake_prob = 45.0
+        # Conservative rule:
+        # Fake only if average is high AND at least 3 engines strongly flag it.
+        if avg_score >= 80.0 and strong_flags >= 3:
+            fake_score = avg_score
+        elif avg_score >= 70.0 and strong_flags >= 4:
+            fake_score = avg_score
         else:
-            # Real-safe compression: normal images remain low risk.
-            fake_prob = min(38.0, max(8.0, avg_score * 0.45))
+            # Treat as likely real / uncertain instead of fake
+            fake_score = min(avg_score, 45.0)
 
-        # Only extremely high average should raise review score.
-        if avg_score >= 82.0 and max_score >= 90.0:
-            fake_prob = max(fake_prob, 78.0)
+    # Biometric penalty only when an actual comparison was performed and rejected
+    if face_cmp and face_cmp.get("status") not in ["N/A", "BYPASSED"] and not face_cmp.get("match", True):
+        fake_score = min(100.0, fake_score + 10.0)
 
-    # Public biometric mismatch should not automatically mean deepfake.
-    if face_cmp and face_cmp.get("match") is False:
-        try:
-            similarity = float(face_cmp.get("similarity_score", 100.0))
-        except Exception:
-            similarity = 100.0
-        if similarity < 35.0:
-            fake_prob = min(100.0, fake_prob + 6.0)
-
-    fake_prob = round(float(fake_prob), 1)
+    fake_prob = round(fake_score, 1)
     real_prob = round(100.0 - fake_prob, 1)
 
-    # Final deepfake threshold: only very strong evidence becomes fake.
     is_fake = fake_prob >= 80.0
     confidence = fake_prob if is_fake else real_prob
 
     if fake_prob < 40.0:
         threat_level = "LOW"
         risk_level = "LOW RISK"
-    elif fake_prob < 65.0:
-        threat_level = "MODERATE"
-        risk_level = "MODERATE RISK / REVIEW REQUIRED"
     elif fake_prob < 80.0:
+        threat_level = "MODERATE"
+        risk_level = "MODERATE RISK"
+    elif fake_prob < 90.0:
         threat_level = "HIGH"
-        risk_level = "HIGH RISK / MANUAL REVIEW REQUIRED"
+        risk_level = "HIGH RISK"
     else:
         threat_level = "CRITICAL"
         risk_level = "CRITICAL"
 
     if media_type == "video":
         verdict = "Deepfake Detected" if is_fake else "Authentic Video"
-        verdict_title = "DEEPFAKE VIDEO DETECTED" if is_fake else "AUTHENTIC VIDEO / NO STRONG DEEPFAKE EVIDENCE"
+        verdict_title = "DEEPFAKE VIDEO DETECTED" if is_fake else "AUTHENTIC VIDEO"
         media_text = "video evidence"
     elif media_type == "audio":
         verdict = "Deepfake Detected" if is_fake else "Authentic Voice"
-        verdict_title = "AI GENERATED VOICE DETECTED" if is_fake else "AUTHENTIC HUMAN VOICE / NO STRONG SYNTHETIC EVIDENCE"
+        verdict_title = "AI GENERATED VOICE DETECTED" if is_fake else "AUTHENTIC HUMAN VOICE"
         media_text = "audio recording"
     else:
         verdict = "Deepfake Detected" if is_fake else "Authentic Image"
-        verdict_title = "DEEPFAKE IMAGE DETECTED" if is_fake else "AUTHENTIC IMAGE / NO STRONG DEEPFAKE EVIDENCE"
+        verdict_title = "DEEPFAKE IMAGE DETECTED" if is_fake else "AUTHENTIC IMAGE"
         media_text = "image asset"
 
-    engine_summary = ", ".join(f"{k}={round(v, 1)}" for k, v in cleaned_scores.items()) or "no engine scores"
-
     explanation = (
-        f"Forensic verification completed for the {media_text}. "
-        f"Engine evidence: {engine_summary}. "
-        f"The final decision uses multi-engine consensus, not a single score. "
-        f"Synthetic probability is {fake_prob}% and genuine probability is {real_prob}%."
+        f"Forensic verification completed. The {media_text} shows a {fake_prob}% probability of synthetic "
+        f"origin versus {real_prob}% probability of genuine capture. "
     )
+    if is_fake:
+        explanation += "Multiple forensic engines strongly indicate synthetic manipulation."
+    else:
+        explanation += "The evidence is not strong enough to classify this as a deepfake."
 
     return {
         "fake_score": fake_prob,
-        "deepfake_score": fake_prob,
         "composite_score": fake_prob,
         "fake_probability": fake_prob,
         "real_probability": real_prob,
@@ -680,7 +658,6 @@ def aggregate_forensic_scores(engine_scores: dict, media_type: str, face_cmp: Op
         "confidence": confidence,
         "verdict": verdict,
         "verdict_title": verdict_title,
-        "result": verdict_title,
         "is_fake": is_fake,
         "ai_forensic_explanation": explanation
     }
@@ -713,21 +690,15 @@ async def analyze_image(
     img_arr = utils.pil_to_numpy(img_pil)
 
     bbox = detector.detect_face(img_arr)
-
-    # If no human face is found, continue using full-image forensic analysis.
-    # This supports AI art, cartoons, objects, and images where face detection fails.
     if bbox is None:
-        h, w = img_arr.shape[:2]
-        bbox = (0, 0, w, h)
-        landmarks = None
-        face_roi = img_arr
-    else:
-        landmarks = detector.extract_landmarks(img_arr)
-        face_roi = detector.get_face_roi(img_arr, bbox)
+        raise HTTPException(status_code=422, detail="No face detected in the uploaded image")
+
+    landmarks = detector.extract_landmarks(img_arr)
+    face_roi  = detector.get_face_roi(img_arr, bbox)
 
     # Enforce face matching for public access (common role)
-    face_cmp = {"similarity_score": 0.0, "status": "N/A", "match": False}
-    if current_user and current_user.get("role") == "common":
+    face_cmp = {"similarity_score": 100.0, "status": "BYPASSED", "match": True}
+    if ENFORCE_PUBLIC_BIOMETRIC_MATCH and current_user and current_user.get("role") == "common":
         check_user_block_status(current_user["username"])
         
         biometrics_data = current_user.get("biometrics_data")
@@ -813,22 +784,12 @@ async def analyze_image(
         "active_engine": "Geometric Landmark Core",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 3.0
+        "total_time": 30.0
     }
 
     ela_result = forensics.run_ela(img_pil, face_roi)
     fft_result = forensics.run_fft(face_roi)
-
-    if landmarks:
-        geo_result = forensics.run_geometry(landmarks, img_arr.shape)
-    else:
-        geo_result = {
-            "score": 5.0,
-            "status": "NO FACE LANDMARKS - FULL IMAGE FORENSIC ANALYSIS USED",
-            "summary": "No facial landmarks detected. The system continued with ELA, FFT, texture, and color forensic analysis.",
-            "table": []
-        }
-
+    geo_result = forensics.run_geometry(landmarks, img_arr.shape)
     tex_result = forensics.run_texture(face_roi)
     col_result = forensics.run_color(img_arr, bbox)
 
@@ -840,6 +801,13 @@ async def analyze_image(
         "texture": tex_result["score"], 
         "color": col_result["score"]
     }
+
+    # Demo calibration:
+    # Some handcrafted forensic engines give high false positives on normal photos.
+    # This softens extreme scores unless multiple engines strongly agree.
+    high_flags = sum(1 for score in engine_scores.values() if score >= 70)
+    if high_flags < 3:
+        engine_scores = {k: min(v, 55.0) for k, v in engine_scores.items()}
     
     # Run central scoring aggregation
     verdict = aggregate_forensic_scores(engine_scores, "image", face_cmp)
@@ -850,7 +818,7 @@ async def analyze_image(
     verdict["timestamp"] = timestamp
 
     img_b64 = {
-        "bbox": _img_to_b64(detector.draw_face_bbox(img_arr, bbox, False)),
+        "bbox": _img_to_b64(detector.draw_face_bbox(img_arr, bbox, verdict["is_fake"])),
         "mesh": _img_to_b64(detector.draw_landmark_mesh(img_arr, landmarks) if landmarks else img_arr),
         "ela":  _img_to_b64(visualizer.render_ela_heatmap(ela_result["ela_image"], ela_result["mean_ela"]) if ela_result.get("ela_image") else None),
         "fft":  _img_to_b64(visualizer.render_fft_spectrum(fft_result.get("log_magnitude"), fft_result["periodicity_score"])),
@@ -924,7 +892,7 @@ async def analyze_image(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 3.0:
+    if elapsed < 30.0:
         sleep_steps = [
             (20, "Error Level Analysis (ELA)", ela_result["score"]),
             (40, "Fast Fourier Transform (FFT)", fft_result["score"]),
@@ -937,7 +905,7 @@ async def analyze_image(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 3.0 - (time.time() - start_time)
+            rem = 30.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
@@ -982,14 +950,15 @@ async def analyze_video(
             break
             
     if test_lm is None:
-        # Continue with temporal/video forensic analysis even if no face is detected.
-        # This supports object videos, screen recordings, cartoons, and low-quality clips.
-        test_lm = None
-        test_shape = frames[0].shape if frames else None
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+        raise HTTPException(status_code=422, detail="No face detected in any of the sampled video frames")
 
     # Enforce face matching for public access (common role)
-    face_cmp = {"similarity_score": 0.0, "status": "N/A", "match": False}
-    if current_user and current_user.get("role") == "common":
+    face_cmp = {"similarity_score": 100.0, "status": "BYPASSED", "match": True}
+    if ENFORCE_PUBLIC_BIOMETRIC_MATCH and current_user and current_user.get("role") == "common":
         try:
             check_user_block_status(current_user["username"])
         except HTTPException:
@@ -1120,7 +1089,7 @@ async def analyze_video(
         "active_engine": "Temporal Consistency Core",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 5.0
+        "total_time": 45.0
     }
 
     has_audio = meta.get("has_audio", False)
@@ -1268,7 +1237,7 @@ async def analyze_video(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 5.0:
+    if elapsed < 45.0:
         sleep_steps = [
             (15, "Temporal Flow Delta", e_temporal["score"]),
             (30, "Identity Persistence Scan", e_identity["score"]),
@@ -1282,7 +1251,7 @@ async def analyze_video(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 5.0 - (time.time() - start_time)
+            rem = 45.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
@@ -1301,7 +1270,7 @@ async def analyze_audio(
 ):
     start_time = time.time()
     current_user = get_current_user(authorization)
-    if current_user and current_user.get("role") == "common":
+    if ENFORCE_PUBLIC_BIOMETRIC_MATCH and current_user and current_user.get("role") == "common":
         check_user_block_status(current_user["username"])
     allowed = {"mp3","wav","m4a","flac","mp4"}
     ext = file.filename.split(".")[-1].lower()
@@ -1341,7 +1310,7 @@ async def analyze_audio(
         "active_engine": "Voice Spectral Ingestion",
         "current_score": 0.0,
         "start_time": start_time,
-        "total_time": 5.0
+        "total_time": 45.0
     }
 
     meta = ae.extract_audio_metadata(file_bytes, file.filename)
@@ -1460,7 +1429,7 @@ async def analyze_audio(
     
     # Enforce processing time & emit live analysis progress
     elapsed = time.time() - start_time
-    if elapsed < 5.0:
+    if elapsed < 45.0:
         sleep_steps = [
             (15, "Voice Spectral Analysis", e_spec["score"]),
             (30, "MFCC Pattern Ingestion", e_mfcc["score"]),
@@ -1474,7 +1443,7 @@ async def analyze_audio(
                 active_scans[username]["progress"] = p
                 active_scans[username]["active_engine"] = eng
                 active_scans[username]["current_score"] = sc
-            rem = 5.0 - (time.time() - start_time)
+            rem = 45.0 - (time.time() - start_time)
             if rem > 0:
                 await asyncio.sleep(rem / (len(sleep_steps) - sleep_steps.index((p, eng, sc))))
 
@@ -1594,7 +1563,7 @@ async def get_admin_stats(authorization: Optional[str] = Header(None)):
 @app.get("/api/report/{scan_id}", response_class=HTMLResponse)
 async def get_report(scan_id: str, authorization: Optional[str] = Header(None)):
     current_user = get_current_user(authorization)
-    if current_user and current_user.get("role") == "common":
+    if ENFORCE_PUBLIC_BIOMETRIC_MATCH and current_user and current_user.get("role") == "common":
         check_user_block_status(current_user["username"])
         
     scan_data = scan_results_store.get(scan_id)
@@ -1613,7 +1582,7 @@ async def get_report(scan_id: str, authorization: Optional[str] = Header(None)):
 @app.get("/api/report/pdf/{scan_id}")
 async def get_pdf_report(scan_id: str, authorization: Optional[str] = Header(None)):
     current_user = get_current_user(authorization)
-    if current_user and current_user.get("role") == "common":
+    if ENFORCE_PUBLIC_BIOMETRIC_MATCH and current_user and current_user.get("role") == "common":
         check_user_block_status(current_user["username"])
         
     scan_data = scan_results_store.get(scan_id)
