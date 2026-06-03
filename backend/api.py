@@ -1674,6 +1674,36 @@ async def get_pdf_report(scan_id: str, authorization: Optional[str] = Header(Non
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Error generating PDF")
 
+
+@app.get("/api/test-mongo")
+async def test_mongo():
+    """
+    Simple MongoDB write test.
+    This does not affect existing login, dashboard, analysis, or report code.
+    Open: /api/test-mongo
+    Then check MongoDB Atlas → Browse Collections → deepfake_forensic → users.
+    """
+    if users_collection is None:
+        return {
+            "success": False,
+            "message": "MongoDB collection is not available. Check database.py and MONGODB_URI."
+        }
+
+    test_doc = {
+        "username": "test_user",
+        "email": "test_user@example.com",
+        "message": "MongoDB connected successfully",
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+
+    result = users_collection.insert_one(test_doc)
+
+    return {
+        "success": True,
+        "message": "Test data inserted into MongoDB",
+        "inserted_id": str(result.inserted_id)
+    }
+
 @app.get("/api/health")
 async def health():
     return {"status": "operational", "timestamp": datetime.datetime.now().isoformat(), "version": "2.0.0"}
