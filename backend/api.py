@@ -418,11 +418,29 @@ def find_user_by_identifier(identifier: str):
 @app.post("/api/login")
 @app.post("/login")
 async def login(req: FlexibleLoginRequest):
-    identifier = req.username or req.email
+    # DEMO LOGIN MODE:
+    # Any Gmail/email/username with any password can login.
+    # Other API functionality is unchanged.
+    identifier = (req.username or req.email or "demo").strip()
+
+    # If existing user is found, keep their stored role/details.
     username, creds = find_user_by_identifier(identifier)
 
-    if not creds or creds.get("password") != req.password:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    # If user is not found, create a temporary common-user profile.
+    if not creds:
+        username = identifier
+        creds = {
+            "password": req.password,
+            "role": "common",
+            "name": identifier.split("@")[0].replace(".", " ").title(),
+            "email": identifier if "@" in identifier else f"{identifier}@demo.com",
+            "organization": "",
+            "biometrics_enrolled": False,
+            "biometrics_data": None,
+            "security_level": 1,
+            "otp_verified": True,
+        }
+        CREDENTIALS[username] = creds
 
     # Update last login time
     creds["last_login"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -432,7 +450,7 @@ async def login(req: FlexibleLoginRequest):
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "operator": username,
         "action": "LOGIN_SUCCESS",
-        "details": f"Credentials approved. Role: {creds['role']}."
+        "details": f"Demo login approved. Role: {creds['role']}."
     })
 
     token = base64.b64encode(
@@ -450,6 +468,7 @@ async def login(req: FlexibleLoginRequest):
         "security_level": creds.get("security_level", 1),
         "message": "Authentication successful"
     }
+
 
 @app.post("/api/auth/signup")
 async def signup(req: SignupRequest):
